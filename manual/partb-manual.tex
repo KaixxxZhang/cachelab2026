@@ -1,0 +1,736 @@
+\documentclass[11pt,a4paper,fontset=fandol]{ctexart}
+\usepackage[margin=2.15cm]{geometry}
+\usepackage{amsmath,amssymb,booktabs,longtable,array,multirow}
+\usepackage{xcolor,enumitem,caption,listings,tikz,fancyhdr}
+\usepackage[unicode,colorlinks,linkcolor=blue!45!black,urlcolor=blue!45!black,citecolor=blue!45!black]{hyperref}
+\usetikzlibrary{arrows.meta,positioning,calc}
+\setmonofont{DejaVu Sans Mono}[Scale=0.82]
+\captionsetup{font=small,skip=4pt}
+\setlist{itemsep=0.25em,topsep=0.35em,leftmargin=1.7em}
+\lstset{
+  language=C,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue!55!black}\bfseries,
+  commentstyle=\color{green!40!black},
+  frame=single,
+  framerule=0.35pt,
+  rulecolor=\color{black!40},
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  tabsize=2,
+  morekeywords={reg,ptr_reg},
+  xleftmargin=0.4em,
+  xrightmargin=0.4em,
+  aboveskip=0.6em,
+  belowskip=0.4em
+}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small CacheLab 2026 Part B 分析手册}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\setlength{\headheight}{14pt}
+\emergencystretch=3em
+\hbadness=10000
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\mreg}{\mathit{miss}_{\mathrm{reg}}}
+\newcommand{\mc}{\mathit{miss}_{\mathrm{cache}}}
+\title{\textbf{CacheLab 2026 Part B 分析手册}\\[0.4em]
+\large 三个 GEMM case 的寄存器分块、cache 映射与缺失分解}
+\author{供实验报告的 Part B 使用。读完后应能自己写下三个 case，手册不代替报告正文。}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+case & $\mc$ & $\mreg$ & latency & 加速比\\
+\midrule
+case1，$16\times16\times16$ & $496$ & $2304$ & $9744$ & $8.2438$\\
+case2，$32\times32\times32$ & $3200$ & $17408$ & $65408$ & $9.2808$\\
+case3，$27\times41\times27$ & $5003$ & $14013$ & $89058$ & $6.8892$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent 加权加速比的精确值是 $8.0131$。满分线是 $W=8$，这里 $W>8$，得分率被截断为 $1$，百分制性能分是 $100$。
+
+\noindent 上表每一个整数都来自仓库评测脚本 \code{python3 test/gemm\_test.py}，并与 \code{csim-ref -s 5 -E 1 -b 4} 的输出一致。四位小数是评测脚本的打印格式。精确比值是
+\[
+\frac{80328}{9744}=8.243842\ldots,\quad
+\frac{607040}{65408}=9.280821\ldots,\quad
+\frac{613542}{89058}=6.889240\ldots,
+\]
+加权
+\[
+W=0.3\cdot\frac{80328}{9744}+0.3\cdot\frac{607040}{65408}+0.4\cdot\frac{613542}{89058}=8.01309557\ldots,
+\]
+脚本印成 $8.0131$。$(W-1)/(8-1)>1$，所以性能分是 $100$ 而不是 $100\times(W-1)/7$。
+
+这份手册的目标只有一个：把上面三个结果从硬件定义推到代码、再推到每一次缺失的来源，中间不跳步。报告模板要求每个 case 自己写，所以第~\ref{sec:write}~节只给提纲和该填的事实，不给可以粘贴的成品段落。
+
+\tableofcontents
+\newpage
+
+%----------------------------------------------------------------------
+\section{这份手册怎么用}
+\label{sec:how}
+
+\subsection{它对应报告模板的哪一条}
+
+报告模板在 \code{report/report.md} 的 Part B，通用要求在 \code{report/README.md}。下表逐条说明手册的哪一节把该条所需的事实备齐。写报告时仍要按模板的字数和格式自己组织，不要把手册整节搬进去。
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{3.6cm}p{5.6cm}p{5.4cm}@{}}
+\toprule
+模板位置 & 模板要你写的内容 & 事实在手册的哪里\\
+\midrule
+Part B 开头的形状约定 & 矩阵用「行 $\times$ 列」；单个矩阵里行、列与 $i$、$j$ 同向 & 第~\ref{sec:shape}~节\\
+亮点 & 按重要性分点写出用过的优化，每点一句能看懂的话 & 第~\ref{sec:choose}~节的四条结论；第~\ref{sec:write}~节告诉你怎么收成要点\\
+最优秀实现的排序 & 三个 case 排一个顺序 & 第~\ref{sec:together}~节给加速比、规律是否整齐、离满分线的余量。顺序由你定\\
+每个 case 的第 1 点 & 写出 $\mc$ 和 $\mreg$ & 第~\ref{sec:c1}、\ref{sec:c2}、\ref{sec:c3}~节开头的代入\\
+每个 case 的第 2 点 & 理论缺失；和实测不符时误差从哪来 & $\mreg$ 在第~\ref{sec:formula}~节推导，三个 case 各代入一次。B、C 的 $\mc$ 可以算到个位，A 的误差用冷缺失 / 换块 / 块内三类拆开\\
+每个 case 的第 3 点 & 块形为什么这样选，设计巧在哪 & 第~\ref{sec:choose}~节是总表，三个 case 各有一节「为什么是这个块形」，含被淘汰形状的实测 latency\\
+naive 的 cache 行为 & 可以讲，篇幅紧就可以不讲 & 第~\ref{sec:base}~节。三个 case 的 B 在 baseline 里都是一次命中都没有\\
+不要贴大段代码 & 一小段配一句解释 & 三个 case 的「代码在做什么」都按循环、累加器、$k$ 循环、写回四段拆开\\
+每个优化带来多少 & 渐进的性能差 & 枚举表里相邻块形的 latency 差就是这一项。循环顺序、$k$ 分块等变体在各 case 末尾，都有实测\\
+额外数据必须可复现 & 网格搜索要给出命令 & 附录~\ref{sec:repro}。完整 $62+73+73$ 行在附录~\ref{sec:sweep}\\
+反馈 / 参考资料 & 模板另有两节，不是 Part B 的三个 case & 手册不代写。第~\ref{sec:write}~节只指出哪些材料你如果引用了就该写进参考资料\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+模板还写了：三个 case 都写细，好于只把一个写细；一个 case 简单做法不宜超过约 $500$ 字，复杂做法不宜超过约 $1000$ 字。手册故意比这个长。报告里建议把 case2 写细（规律对 $64$ 个块都一样），case1 说明它是同一套机制在「半个 cache」上的变形，case3 写清边缘划分以及 B、C 的行数手算。
+
+\code{report/README.md} 还要求少贴代码、少写助教已经知道的背景、先总后分。手册第~\ref{sec:model}~节里的硬件定义报告里用两三句带过即可，把篇幅留给块形和缺失分解。
+
+\subsection{数字从哪来，实现以哪份代码为准}
+
+计分的三份函数以 \code{uploads/gemm\_ref.cpp} 为准。仓库里的 \code{gemm.cpp} 用 \code{diff} 对比后，case1、case2、case3 的函数体相同；差别只在文件头注释，以及 case0 多了或少了 \code{(void)buffer}。case0 不计入性能分。下面的评测是在仓库这份 \code{gemm.cpp} 上跑的，因此就是 \code{gemm\_ref.cpp} 的 case1--3。
+
+四条复现路径，后面每一张表都能落回其中一条：
+
+\begin{enumerate}
+  \item \textbf{官方评测。}在仓库根目录分别运行 \code{python3 test/gemm\_test.py} 与带 \code{-{}-baseline} 的同一脚本。$\mc$ 来自 \code{csim-ref} 写入 \code{.csim\_results} 的 misses。$\mreg$ 是对应 trace 的行数。latency $=15\cdot\mc+\mreg$。加速比是 baseline 的 latency 除以实现的 latency。上表就是这次运行的结果。
+  \item \textbf{寄存器峰值。}\code{./printTrace case1} 在标准错误输出 \code{Pass using 28 regs}，case2 也是 $28$，case3 是 $36$，baseline 是 $10$。边缘小块的峰值不会单独出现在这个最大值里，所以另有 \code{manual/scripts/probe\_regs.cpp}，在 $k$ 循环最内层打印 \code{get\_current\_reg\_count()}。
+  \item \textbf{块形枚举和缺失分类。}\code{python3 manual/scripts/analyze\_partb.py} 按与实现相同的访存顺序生成地址，用同一个直接映射 cache 计数。它生成的 case0--3 以及四份 baseline 的地址序列与官方 trace 逐条相同，因此 $\mc$ 与 \code{csim-ref} 相同。脚本再用 \code{csim-ref} 复核了 $4\times4$、$5\times4$、$4\times6$、$3\times8$、$3\times7$ 等形状。
+  \item \textbf{框架交叉检查。}加上 \code{-{}-crosscheck} 时，脚本在 \code{/tmp} 里用实验框架编译 $2\times8$、$4\times6$、$5\times4$、$3\times6$、$4\times5$ 等核，trace 与模拟器逐条相同。它不修改仓库里的 \code{gemm.cpp}。
+\end{enumerate}
+
+下文如果写「实测」，指的就是这四条里的一条，并在该处说明是哪一条。没有出现在评测输出、探针输出或脚本输出里的整数，下文会把它写成一步算术，并给出从哪两个已测数字减出来。
+
+%----------------------------------------------------------------------
+\section{模型与记号}
+\label{sec:model}
+
+\subsection{矩阵形状}
+\label{sec:shape}
+
+$C=AB$。$m\times n\times p$ 的含义是：
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+矩阵 & 形状（行 $\times$ 列） & 元素个数 & 在三层循环里的角色\\
+\midrule
+$A$ & $m$ 行 $\times$ $n$ 列 & $mn$ & 第 $i$ 行第 $k$ 列，$A[i\cdot n+k]$\\
+$B$ & $n$ 行 $\times$ $p$ 列 & $np$ & 第 $k$ 行第 $j$ 列，$B[k\cdot p+j]$\\
+$C$ & $m$ 行 $\times$ $p$ 列 & $mp$ & 第 $i$ 行第 $j$ 列，$C[i\cdot p+j]$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+单个矩阵里，行下标写在前面，列下标写在后面，和模板要求的「行，列 $\Leftrightarrow$ $i$，$j$」一致。三个矩阵同时出现时，$k$ 是 $A$ 的列、也是 $B$ 的行，不要把 $B$ 的行叫作 $j$。
+
+维度定义在 \code{simulator.h}：
+
+\begin{center}
+\begin{tabular}{@{}lccccl@{}}
+\toprule
+case & $m$ & $n$ & $p$ & 是否计分 & 权重\\
+\midrule
+case0 & $2$ & $2$ & $2$ & 否 & $0$\\
+case1 & $16$ & $16$ & $16$ & 是 & $0.3$\\
+case2 & $32$ & $32$ & $32$ & 是 & $0.3$\\
+case3 & $27$ & $41$ & $27$ & 是 & $0.4$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+case3 里 $n=41$ 是 $A$ 的列数和 $B$ 的行数，也就是 $k$ 循环的长度；$p=27$ 才是 $B$ 和 $C$ 的列数。$41$ 是素数，它整除不了任何大于 $1$ 的块宽，但实现并不沿 $k$ 切块，所以 $41$ 的素性不限制 $R\times S$。限制列方向块宽的是 $p=27$，它的正因数只有 $1,3,9,27$。
+
+存储是行优先。$A$ 的第 $i$ 行第 $k$ 列紧挨着第 $k+1$ 列；下一行在 $n$ 个 \code{int} 之后。
+
+\subsection{latency 怎么从 README 的两句话得来}
+\label{sec:latency}
+
+README 对 Part B 的硬件给了两句代价，和两个计数定义：
+
+\begin{itemize}
+  \item 读写一次内存，$15$ 个单位时间；读写一次 cache，$1$ 个单位时间。加法和乘法算 $0$。
+  \item \code{csim-ref} 输出的 misses 是算法读写内存的次数，记作 $\mc$。
+  \item trace 的行数是读写 cache 的次数，记作 $\mreg$。
+\end{itemize}
+
+一次 \code{load} 或 \code{store} 在 trace 里占一行，所以它一定访问 cache，先记 $1$。这一行若在 cache 中命中，内存不再被访问，不再加 $15$。若缺失，还要访问内存，再加 $15$。把所有行加起来：
+\begin{equation}
+\label{eq:lat}
+\mathrm{latency}=1\cdot\mreg+15\cdot\mc=15\cdot\mc+\mreg.
+\end{equation}
+命中不是免费的：它仍在 $\mreg$ 里。缺失也不是只记 $15$：那一行已经在 $\mreg$ 里记过 $1$，再加 $15$。因此
+\[
+\mathrm{latency}=\underbrace{\mreg}_{\text{每次访存都付}}+\underbrace{15\cdot\mc}_{\text{只有缺失才付}}.
+\]
+评测脚本 \code{test/gemm\_test.py} 里就是 \code{latency = 15 * miss\_cache + miss\_reg}，加速比是 baseline 的 latency 除以这个 latency。综合加速比
+\[
+W=0.3\,x_1+0.3\,x_2+0.4\,x_3,
+\]
+$x_i$ 是 case $i$ 的加速比，case0 的权重是 $0$。得分率
+\[
+s=\min\Bigl(1,\ \max\bigl(0,\ (W-1)/(8-1)\bigr)\Bigr),
+\]
+Part B 的百分制性能分是 $100s$。$W=1$ 得 $0$ 分，$W=8$ 得满分，超过 $8$ 不再加分。
+
+\subsection{cache 的几何}
+\label{sec:cache}
+
+参数 $s=5$，$E=1$，$b=4$，替换策略在 $E=1$ 时没有选择余地。
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+量 & 值\\
+\midrule
+组数 & $2^s=32$\\
+每组行数 & $E=1$，直接映射\\
+块大小 & $2^b=16$ 字节 $=4$ 个 \code{int}\\
+总容量 & $32\times 16=512$ 字节 $=128$ 个 \code{int}\\
+地址划分 & 偏移 $b=4$ 位，组号 $s=5$ 位，其余是 tag\\
+组号 & $(\mathrm{addr}\gg 4)\bmod 32$\\
+tag & $\mathrm{addr}\gg 9$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[x=0.78cm,y=0.55cm,font=\small]
+  \draw[fill=blue!12] (0,0) rectangle (6,1.2);
+  \draw[fill=orange!25] (6,0) rectangle (9,1.2);
+  \draw[fill=green!18] (9,0) rectangle (11.2,1.2);
+  \node at (3,0.6) {tag $=\mathrm{addr}[63:9]$};
+  \node at (7.5,0.6) {组 $[8:4]$};
+  \node at (10.1,0.6) {偏移};
+  \node[below] at (7.5,-0.15) {$5$ 位，$32$ 组};
+  \node[below] at (10.1,-0.15) {$4$ 位};
+  \node[above] at (5.6,1.25) {一次访问只看这一条 $16$ 字节行};
+\end{tikzpicture}
+\caption{地址划分。偏移相同、组号相同、tag 不同的两条 $16$ 字节行互相替换。}
+\label{fig:bits}
+\end{figure}
+
+模拟地址从 \code{0x30000000} 起，这个数的低 $9$ 位是 $0$，也就是 $512$ 字节对齐。因此从 $A$ 的第一个 \code{int} 数起，下标为 $t$（从 $0$ 数）的元素：
+\begin{align}
+\text{字节地址}&=0\texttt{x30000000}+4t,\\
+\text{块号}&=\lfloor t/4\rfloor,\\
+\text{组号}&=\lfloor t/4\rfloor \bmod 32.
+\label{eq:set}
+\end{align}
+一个 \code{int} 占 $4$ 字节，基址又是 $16$ 字节对齐的，所以任何一个 \code{int} 都不会横跨两条 cache 行。下标 $4u,4u+1,4u+2,4u+3$ 在同一条行里。
+
+两条 cache 行冲突，当且仅当它们的块号相差 $32$ 的非零整数倍。相差 $128$ 个 \code{int}（$512$ 字节）的两条行一定冲突。判断时用块号，不要用「两个下标之差是不是 $128$」：下标 $1$ 和下标 $128$ 差 $127$，但它们分别落在块 $0$ 和块 $32$，组号都是 $0$，仍然冲突。
+
+$E=1$，组里只能留一块。后读进来的 tag 把先读进来的 tag 换掉，没有 LRU 可调。\code{csim-ref} 的 evictions 是「这次缺失时该组已经有一块」。三个 case 的实现都有
+\[
+\mc-\mathrm{evictions}=32,
+\]
+即 $496-464$、$3200-3168$、$5003-4971$。$32$ 个组全部被装进过数据。这个等式只说明组被铺满，不能代替后面按矩阵拆开的缺失数。
+
+\subsection{A、B、C 在地址空间里怎么排}
+\label{sec:layout}
+
+\code{matrix.cpp} 的 \code{init} 按 $A$、$B$、$C$、\code{buffer} 的顺序放进一块连续内存。\code{buffer} 有 \code{BUFFER\_SIZE}$=64$ 个 \code{int}。实现没有读它，也没有写它。$A$ 的模拟基址是 \code{0x30000000}。
+
+设 $A$ 有 $mn$ 个 \code{int}，则 $B$ 从下标 $mn$ 开始，$C$ 从下标 $mn+np$ 开始。三个 case 的起点如下。字节数 $=4\times$ 元素数；「模 $512$」是起始字节相对 $A$ 的起点除以 $512$ 的余数，也就是这条起点相对组 $0$ 的偏移。
+
+\begin{center}
+\small
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+case & 区域 & 元素 & 字节 & 起始下标 & 起始字节模 $512$\\
+\midrule
+case1 & $A$ & $256$ & $1024$ & $0$ & $0$\\
+ & $B$ & $256$ & $1024$ & $256$ & $0$\\
+ & $C$ & $256$ & $1024$ & $512$ & $0$\\
+case2 & $A,B,C$ 各 & $1024$ & $4096$ & $0,\ 1024,\ 2048$ & 全是 $0$\\
+case3 & $A$ & $1107$ & $4428$ & $0$ & $0$\\
+ & $B$ & $1107$ & $4428$ & $1107$ & $332$\\
+ & $C$ & $729$ & $2916$ & $2214$ & $152$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$1024$ 和 $4096$ 都是 $512$ 的倍数，所以 case1、case2 里 $A[i][j]$、$B[i][j]$、$C[i][j]$ 的组号相同：三个矩阵用同一套组号函数。case2 的计算是
+\[
+\lfloor(1024+i\cdot 32+j)/4\rfloor=\lfloor i\cdot 32+j\rfloor/4+256,
+\]
+$256$ 是 $32$ 的倍数，模 $32$ 以后和 $A$ 的组号一样。case1 把 $32$ 换成 $16$、$256$ 换成 $256$，同样整除。
+
+case3 对不齐。$1107=4\cdot276+3$，所以 $B[0][0]$ 落在 $A$ 最后三个元素所在的那一条 cache 行里。$2214=4\cdot553+2$，所以 $C[0][0]$ 和 $C[0][1]$ 与 $B$ 的最后两个元素同一条行。这两条共享行是：
+
+\begin{center}
+\small
+\begin{tabular}{@{}rll@{}}
+\toprule
+块号 & 组号 & 里面的元素\\
+\midrule
+$276$ & $20$ & $A[26][38]$、$A[26][39]$、$A[26][40]$、$B[0][0]$\\
+$553$ & $9$ & $B[40][25]$、$B[40][26]$、$C[0][0]$、$C[0][1]$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+冷缺失按「这块第一次被碰到时，正在访问哪个矩阵」记账。块 $276$ 在 $k=0$ 读 $B[0][0]$ 时就被装入，那时 $A$ 的最后一行还没读，所以它算 $B$ 的冷缺失。块 $553$ 在第一块 $4\times6$ 写 $C[0][0]$ 时被装入，那时 $B[40][25]$ 还没读（它属于列 $24$--$26$ 的边缘块），所以它算 $C$ 的冷缺失。第~\ref{sec:c3miss}~节用这个事实对上 $276+277+183=736$。
+
+\subsection{寄存器在框架里怎么数}
+\label{sec:regs}
+
+框架只允许 \code{reg} 和 \code{ptr\_reg}。每个还活着的对象占一个寄存器，上限 $36$，定义在 \code{common.h} 的 \code{reg\_num}。超限会在运行时抛出。\code{get\_max\_reg\_count()} 记的是同时存活的峰值，不是声明过的总数。
+
+四条和计数有关、容易数错的规则：
+
+\begin{enumerate}
+  \item 参数 \code{A,B,C,buffer} 四个 \code{ptr\_reg} 从进入函数到返回一直活着。\code{(void)buffer;} 只是消除未使用警告，不结束 \code{buffer} 的寿命，也不产生 trace。
+  \item \code{for (reg i0 = 0; ...)} 的 \code{i0} 在整个 \code{for} 期间活着，包括内层循环。内层结束后它还在。
+  \item 同一条语句里声明的 \code{reg c00 = 0, c01 = 0, ...} 是多个对象，一起活到所在块结束。两个 \code{for} 前后衔接时，前一个块的累加器先析构，后一个块的累加器才构造。峰值是两者的较大值，不是相加。
+  \item \code{i0 + 0}、\code{(i0 + 0) * n + k} 的 \code{operator+} 和 \code{operator*} 在框架里返回的是普通 \code{int}，不是新的 \code{reg}。下标运算不占模拟寄存器，也不写 trace。这一点用 trace 长度检验：case1 的 trace 是 $2304$ 行，与第~\ref{sec:formula}~节只统计显式 load/store 的公式相同。若下标运算偷偷访问了内存，行数会对不上。
+\end{enumerate}
+
+因此在 $k$ 循环最里面，同时活着的是：
+
+\begin{center}
+\begin{tabular}{@{}lcl@{}}
+\toprule
+对象 & 个数 & 何时释放\\
+\midrule
+\code{A,B,C,buffer} & $4$ & 函数返回\\
+\code{i0}、\code{j0} & $2$ & 各自的 \code{for} 结束\\
+\code{k} & $1$ & $k$ 循环结束\\
+累加器 $c_{r,s}$ & $R_h S_h$ & 该块的花括号结束\\
+\code{a0} \ldots \code{a}$_{R_h-1}$ & $R_h$ & $k$ 循环的一次迭代结束\\
+\code{b} & $1$ & 同一次迭代结束；同一个 \code{b} 被赋值 $S_h$ 次\\
+\midrule
+合计 & $R_h S_h+R_h+8$ & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+主块 $R_h=R$、$S_h=S$ 时，约束写成
+\begin{equation}
+\label{eq:reg}
+RS+R+8\le 36\qquad\text{即}\qquad R(S+1)\le 28.
+\end{equation}
+$k$ 循环结束以后，\code{k}、\code{a*}、\code{b} 已经析构，写回 $C$ 时只剩 $4+2+RS=RS+6$ 个。写回不会把峰值再抬高。
+
+探针 \code{manual/scripts/probe\_regs.cpp} 在 \code{-O0} 下、用实验头文件编译，在最内层和 $k$ 循环刚结束时各打印一次当前个数。结果与公式一致：
+
+\begin{center}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+块 & 公式 $RS+R+8$ & 最内层实测 & $k$ 结束后实测\\
+\midrule
+$4\times4$ & $28$ & $28$ & $22=16+6$\\
+$4\times6$ & $36$ & $36$ & $30=24+6$\\
+$4\times3$ & $24$ & $24$ & $18$\\
+$3\times6$ & $29$ & $29$ & $24$\\
+$3\times3$ & $20$ & $20$ & $15$\\
+$5\times4$ & $33$ & $33$ & $26$\\
+$2\times8$ & $26$ & $26$ & $22$\\
+$1\times1$（baseline 的形状） & $10$ & $10$ & $7$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\code{./printTrace} 对完整 case1、case2 打印的峰值是 $28$，case3 是 $36$。case3 里 $4\times3$、$3\times6$、$3\times3$ 的 $24$、$29$、$20$ 都被 $36$ 盖住，所以官方那一行字只能证明主块，边缘块要看探针。
+
+若把 $S$ 个 $B$ 元素同时留在寄存器里，个数变成 $RS+R+S+7$：$S$ 个 $b$ 替换掉那 $1$ 个复用的 $b$，少一个复用、多 $S-1$ 个。每次 $B$ 仍然只 load 一次，$\mreg$ 不变，可行的 $(R,S)$ 却变少。实现复用一个 \code{b}，是在不改变 $\mreg$ 的前提下放宽~\eqref{eq:reg}。
+
+%----------------------------------------------------------------------
+\section{baseline 在付什么钱}
+\label{sec:base}
+
+baseline 对每个 $C[i][j]$ 做一遍 $k$。\code{gemm\_baseline.cpp} 的内层是：
+
+\begin{lstlisting}
+reg tmpc = 0;
+for (reg k = 0; k < n; ++k) {
+  reg tmpa = A[i * n + k];
+  reg tmpb = B[k * p + j];
+  tmpc += tmpa * tmpb;
+}
+C[i * p + j] = tmpc;
+\end{lstlisting}
+
+每个输出元素：$n$ 次读 $A$，$n$ 次读 $B$，$1$ 次写 $C$。$C$ 的初值直接写成 $0$，不读旧的 $C$。元素共 $mp$ 个，所以
+\begin{equation}
+\label{eq:base-reg}
+\mreg=mp(2n+1).
+\end{equation}
+这和 $R=S=1$ 的分块公式是同一个式子，因为 $1/1+1/1=2$。代入：
+
+\begin{align*}
+\text{case1:}&\quad 256\cdot(32+1)=8448,\\
+\text{case2:}&\quad 1024\cdot(64+1)=66560,\\
+\text{case3:}&\quad 729\cdot(82+1)=60507.
+\end{align*}
+三份 baseline trace 的行数就是这三个数。latency 再用~\eqref{eq:lat}：
+
+\begin{align*}
+\text{case1:}&\quad 15\cdot4792+8448=80328,\\
+\text{case2:}&\quad 15\cdot36032+66560=607040,\\
+\text{case3:}&\quad 15\cdot36869+60507=613542.
+\end{align*}
+
+$\mc$ 不能只靠~\eqref{eq:base-reg} 得到，因为公式数的是指令，不是缺失。按地址把 trace 拆开（模拟器与官方 trace 逐条相同之后再分类）：
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+case & $A$ 访问 / 缺失 & $B$ 访问 / 缺失 & $C$ 访问 / 缺失 & $\mc$ & $\mreg$ & latency\\
+\midrule
+case1 & $4096/440$ & $4096/4096$ & $256/256$ & $4792$ & $8448$ & $80328$\\
+case2 & $32768/2240$ & $32768/32768$ & $1024/1024$ & $36032$ & $66560$ & $607040$\\
+case3 & $29889/6284$ & $29889/29889$ & $729/696$ & $36869$ & $60507$ & $613542$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+三列缺失之和就是 $\mc$：$440+4096+256=4792$，$2240+32768+1024=36032$，$6284+29889+696=36869$。
+
+\paragraph{$B$ 为什么一次命中都没有。}
+以 case1 为例。$B[k][j]$ 到 $B[k+1][j]$ 的下标差是 $p=16$ 个 \code{int}，即 $4$ 条 cache 行。内层沿列走，相邻两次 $B$ 不在同一条行里，所以没有「读一个 \code{int}、同行的另外三个也命中」这种空间命中。
+
+同一条行里的下一个列要等这次 $j$ 的 $k$ 循环走完。而下一步常常立刻把刚装入的行挤掉。具体到 $i=0$、$j=0$：
+\begin{enumerate}
+  \item $A[0][0]$ 和 $B[0][0]$ 的块号模 $32$ 都是 $0$，都在第 $0$ 组。
+  \item 先读 $A[0][0]$，再读 $B[0][0]$，$B$ 把 $A$ 挤出第 $0$ 组。
+  \item $k=1$ 时 $A[0][1]$ 仍在 $A[0][0]$ 那一条行、仍是第 $0$ 组，这一下又把 $B[0][0]$ 所在的行挤掉。
+\end{enumerate}
+$B[0][0]$ 所在的行还包含 $B[0][1]$、$B[0][2]$、$B[0][3]$。还没轮到 $j=1$，这条行已经不在 cache 里。对其余元素，模拟器统计到的 $B$ 命中数是 $0$：$4096$ 次访问全部缺失。case2、case3 的 baseline 同样是 $B$ 命中数 $0$。case2 的列步长是 $32$ 个 \code{int}，case3 是 $27$ 个 \code{int}，都不是 $0$，内层同样不沿行走。
+
+\paragraph{$C$ 为什么在 case1、case2 里也全缺失。}
+每个 $C[i][j]$ 只写一次，但同一条 cache 行上的 $4$ 个 \code{int} 分属 $4$ 个连续的 $j$。两个 $j$ 之间隔着一整遍 $k$ 循环。case1 的 $C$ 有 $256/4=64$ 条行，每条行上的 $4$ 次写全部缺失：$64\times4=256$，命中 $0$。case2 是 $1024/4=256$ 条行，缺失 $1024$。case3 的行宽 $27$ 不按 $4$ 对齐，相邻两次写有时还落在同一条尚未被挤掉的行上，所以 $729$ 次写里有 $33$ 次命中、$696$ 次缺失。优化以后写回顺序会换成「一个小块的连续列一次写完」，这 $33$ 次不必再逐个定位。
+
+\paragraph{$A$ 为什么比 $B$ 好，但仍然远不是只缺一次。}
+$A$ 沿行走，$4$ 个连续 $k$ 落在一条 cache 行里，本来可以 $1$ 次缺失加 $3$ 次命中。上面的第 $3$ 步说明连这 $3$ 次也不稳：$B$ 插在两次 $A$ 之间，把刚装入的 $A$ 行挤掉，$A[0][1]$ 变成又一次缺失。case1 的 $A$ 是 $4096$ 次访问、$440$ 次缺失（其中冷缺失 $64$，即 $256/4$ 条行各第一次，其余 $376$ 次是被挤掉以后的重载），命中 $3656$。case2 是 $2240$ 次缺失，冷缺失 $256$。
+
+后面分块要同时动两件事：把同一个 $A[i][k]$ 留在寄存器里供 $S$ 个列使用，使 $\mreg$ 从 $mp(2n+1)$ 降下来；把 $B$ 改成沿行连续读，使一条 cache 行的 $4$ 个 \code{int} 在被挤掉之前用完。
+
+%----------------------------------------------------------------------
+\section{寄存器分块：指令数与块形约束}
+\label{sec:formula}
+
+\subsection{一个 \texorpdfstring{$R\times S$}{RxS} 小块在做什么}
+
+固定 $C$ 的一个高 $R_h$、宽 $S_h$ 的小块，行起点 $i_0$、列起点 $j_0$。$R_h=\min(R,m-i_0)$，$S_h=\min(S,p-j_0)$。$k$ 从 $0$ 走到 $n-1$，不中途把 $C$ 写回。伪代码与实现的访存顺序一致：
+
+\begin{lstlisting}
+for i0 = 0; i0 < m; i0 += R
+  for j0 = 0; j0 < p; j0 += S
+    Rh = min(R, m-i0);  Sh = min(S, p-j0)
+    c[0..Rh)[0..Sh) = 0          // Rh*Sh 个寄存器，不读 C
+    for k = 0; k < n; k += 1
+      a[r] = A[(i0+r)*n + k]     // r = 0..Rh-1，共 Rh 次 load
+      for s = 0; s < Sh; s += 1
+        b = B[k*p + j0+s]        // 同一个 b，Sh 次 load
+        c[r][s] += a[r] * b      // 全是寄存器，0 次访存
+    把 c 按行写回 C              // Rh*Sh 次 store
+\end{lstlisting}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[scale=0.34,font=\small]
+  \draw[gray] (0,0) rectangle (8,8);
+  \node at (4,8.7) {$A$：$m$ 行 $\times$ $n$ 列};
+  \fill[orange!30] (0,4.2) rectangle (8,6.6);
+  \draw (0,4.2) rectangle (8,6.6);
+  \draw[very thick,red] (3.2,4.2) rectangle (3.7,6.6);
+  \node[left] at (0,5.4) {$R$ 行};
+  \draw[gray] (10,0) rectangle (18,8);
+  \node at (14,8.7) {$B$：$n$ 行 $\times$ $p$ 列};
+  \fill[blue!20] (12.6,0) rectangle (15.2,8);
+  \draw (12.6,0) rectangle (15.2,8);
+  \draw[very thick,red] (12.6,4.6) rectangle (15.2,5.15);
+  \node[below] at (13.9,-0.15) {$S$ 列};
+  \draw[gray] (20,0) rectangle (28,8);
+  \node at (24,8.7) {$C$：$m$ 行 $\times$ $p$ 列};
+  \fill[green!30] (22.4,4.2) rectangle (25.2,6.6);
+  \draw[thick] (22.4,4.2) rectangle (25.2,6.6);
+  \node[align=center,font=\footnotesize] at (14,-2.2)
+    {同一个 $k$：红框是 $R$ 个 $A$ 和 $S$ 个 $B$。$B$ 的 $S$ 个元素在同一行里连续。};
+\end{tikzpicture}
+\caption{$k$ 增加时，红框在 $A$ 里向右移动一列，在 $B$ 里向下移动一行。$C$ 的绿色小块一直留在寄存器里，到 $k$ 走完才写。}
+\label{fig:block}
+\end{figure}
+
+同一个 $k$ 上，$A$ 的 $R_h$ 个元素各用 $S_h$ 次，但只 load 一次；$B$ 的 $S_h$ 个元素各用 $R_h$ 次，也只 load 一次。若像 baseline 那样对每个 $(r,s)$ 重新 load，这一步会是 $2 R_h S_h$ 次而不是 $R_h+S_h$ 次。
+
+\subsection{\texorpdfstring{$\mreg$}{miss\_reg} 的求和}
+
+一块的指令数是
+\[
+n(R_h+S_h)+R_h S_h.
+\]
+前一项是 $k$ 循环的 load，后一项是最后的 store。把所有块加起来。$i$ 方向的块高依次是 $R,R,\ldots$ 以及可能的余数 $m\bmod R$，这些高度之和是 $m$。每一档高度都要配上全部的 $j$ 块，而 $j$ 块的个数是 $\lceil p/S\rceil$。所以
+\[
+\sum_{\text{块}} R_h = m\cdot\lceil p/S\rceil.
+\]
+同样
+\[
+\sum_{\text{块}} S_h = p\cdot\lceil m/R\rceil,\qquad
+\sum_{\text{块}} R_h S_h = mp.
+\]
+最后一步是因为这些小块把 $C$ 不重叠地铺满。因此
+\begin{equation}
+\label{eq:mreg}
+\mreg
+=n\Bigl(m\Bigl\lceil\frac{p}{S}\Bigr\rceil+p\Bigl\lceil\frac{m}{R}\Bigr\rceil\Bigr)+mp.
+\end{equation}
+当 $R$ 整除 $m$ 且 $S$ 整除 $p$ 时，$\lceil p/S\rceil=p/S$，$\lceil m/R\rceil=m/R$，~\eqref{eq:mreg} 化成
+\begin{equation}
+\label{eq:mreg-div}
+\mreg=mnp\Bigl(\frac1R+\frac1S\Bigr)+mp.
+\end{equation}
+两项的来源可以分开看，整除时：
+\begin{align*}
+A\text{ 的 load 次数}
+&=(\text{块数})\cdot n\cdot R
+=\frac{m}{R}\cdot\frac{p}{S}\cdot n\cdot R
+=\frac{mnp}{S},\\[0.3em]
+B\text{ 的 load 次数}
+&=\frac{mnp}{R},\\[0.3em]
+C\text{ 的 store 次数}
+&=mp.
+\end{align*}
+$A$ 的每个元素被重新 load 的次数等于 $j$ 方向的块数 $p/S$：换一个列块，$k$ 得从头再走，寄存器里已经没有上一个列块的 $A$。$B$ 的每个元素被重新 load 的次数等于 $i$ 方向的块数 $m/R$。
+
+不整除时不能把~\eqref{eq:mreg-div} 四舍五入来用。case3 的 $4\times6$ 若错误地套~\eqref{eq:mreg-div}，
+\[
+27\cdot41\cdot27\cdot\Bigl(\frac14+\frac16\Bigr)+27\cdot27
+=29889\cdot\frac{5}{12}+729=13182.75,
+\]
+不是整数，也不是实测的 $14013$。必须用~\eqref{eq:mreg} 或按四类小块分别乘。第~\ref{sec:c3reg}~节会把两类算法都算完。
+
+实现的循环方向是 $i_0$ 在外、$j_0$ 在内。把两层对调不改变~\eqref{eq:mreg}，因为指令集合不变，只改变顺序，从而可能改变 $\mc$。第~\ref{sec:c2}~节有对调之后的实测。
+
+\subsection{边缘块为什么要写成独立循环}
+
+框架里累加器的个数必须在编译期写死，不能按运行时的 $R_h$ 去 \code{new reg[Rh*Sh]} 再指望峰值只算「当前用到的」——数组里的对象只要还没 \code{delete} 就都占着。实现的做法是：主循环的条件写成 \code{i0 + (R-1) < m}，只走满块；余数用另一个循环，累加器个数改成余数。case3 的余数恰好是 $3$，所以边缘循环是
+\[
+\code{for (j0 = p - 3; j0 + 2 < p; j0 = j0 + 3)}.
+\]
+$p=27$ 时 $j_0$ 从 $24$ 开始，$24+2<27$ 成立，下一步 $j_0=27$ 不再满足，循环体只执行一次，覆盖列 $24,25,26$。它和「从 $0$ 开始每次加 $6$，最后一块取剩余 $3$ 列」覆盖的列集合相同，顺序也相同。这一点由 trace 对比保证：按 $\min$ 规则生成的地址序列与 \code{gemm\_case3} 的官方 trace 逐条相同，共 $14013$ 行。
+
+%----------------------------------------------------------------------
+\section{块形怎么选}
+\label{sec:choose}
+
+\subsection{先列出约束，再对每个可行块实测}
+
+可选的 $(R,S)$ 同时满足 $1\le R\le m$、$1\le S\le p$ 和~\eqref{eq:reg}。这样的块：
+
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+ & case1 & case2 & case3\\
+\midrule
+合法块形个数 & $62$ & $73$ & $73$\\
+其中 $R\mid m$ 且 $S\mid p$ 的 & $14$ & $13$ & $7$\\
+latency 最小的 & $4\times4$ 与 $5\times4$ 并列 & $4\times4$ 唯一 & $4\times6$ 唯一\\
+实现采用的 & $4\times4$ & $4\times4$ & $4\times6$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$R$ 的上界可以先看出来：即使 $S=1$，$R(1+1)\le 28$，所以 $R\le 14$。$S=7$、$R=4$ 时 $4\cdot8=32>28$，不合法。贴着上界、后面会反复比较的几档是：
+
+\begin{center}
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+$R\times S$ & $RS+R+8$ & $1/R+1/S$（只在整除时等于系数） & 是否 $\le 36$\\
+\midrule
+$4\times4$ & $28$ & $0.500$ & 是\\
+$4\times5$ & $32$ & $0.450$ & 是\\
+$4\times6$ & $36$ & $0.417$ & 是\\
+$4\times7$ & $40$ & $0.393$ & 否\\
+$5\times4$ & $33$ & $0.450$ & 是\\
+$5\times5$ & $38$ & $0.400$ & 否\\
+$3\times8$ & $35$ & $0.458$ & 是\\
+$3\times9$ & $38$ & $0.444$ & 否\\
+$2\times13$ & $36$ & $0.577$ & 是\\
+$1\times27$ & $36$ & $1.037$ & 是\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$1/R+1/S$ 只决定整除时的 $\mreg$。latency 还要乘上 $\mc$，而 $\mc$ 对「$S$ 是不是 $4$ 的倍数、起点是不是 $16$ 字节对齐」非常敏感。一条 $B$ 的切片若正好是 $4$ 个对齐的 \code{int}，则每个 $k$ 只新开 $1$ 条 cache 行；若宽是 $6$，同一行里的 $6$ 个 \code{int} 会跨 $2$ 或 $3$ 条行。多出来的缺失按 $15$ 计，很容易吃掉 $\mreg$ 上的好处。
+
+设两种块形的 $\mreg$ 相差 $\Delta_r$（正数表示第二种更少），$\mc$ 相差 $\Delta_c$（正数表示第二种更多）。latency 的差是 $15\Delta_c-\Delta_r$。第二种更好，当且仅当
+\begin{equation}
+\label{eq:be}
+\Delta_c < \Delta_r/15.
+\end{equation}
+这就是选块时的盈亏平衡。$\Delta_r=256$ 时，只要多 $17$ 次 cache 缺失，latency 就变差（$15\times17=255$）。
+
+\subsection{三个 case 的前几名}
+
+下面每张表都是模拟器对「$i_0$ 在外、$j_0$ 在内、先读 $R_h$ 个 $A$、再读 $S_h$ 个 $B$」这一顺序的实测，并已用 \code{csim-ref} 核对过表中标了星号的行。完整 $62$/$73$/$73$ 行在附录~\ref{sec:sweep}，按 latency 升序。
+
+\begin{center}
+\captionof{table}{case1 按 latency 排在前面的块形，以及几个整除对照。星号表示 \code{csim-ref} 复核过 $\mc$。}
+\label{tab:top1}
+\small
+\begin{tabular}{@{}rrrrrrrrl@{}}
+\toprule
+$R\times S$ & 寄存器 & 整除 & $\mreg$ & $\mc$ & $A/B/C$ & latency & 加速比 & \\
+\midrule
+$4\times4$ & $28$ & 是 & $2304$ & $496$ & $176/256/64$ & $9744$ & $8.2438$ & * 采用\\
+$5\times4$ & $33$ & 否 & $2304$ & $496$ & $176/256/64$ & $9744$ & $8.2438$ & * 并列\\
+$4\times6$ & $36$ & 否 & $2048$ & $590$ & $190/320/80$ & $10898$ & $7.3709$ & *\\
+$3\times8$ & $35$ & 否 & $2304$ & $600$ & $152/384/64$ & $11304$ & $7.1062$ & \\
+$8\times2$ & $32$ & 是 & $2816$ & $648$ & $264/256/128$ & $12536$ & $6.4078$ & \\
+$2\times8$ & $26$ & 是 & $2816$ & $728$ & $152/512/64$ & $13736$ & $5.8480$ & *\\
+$1\times1$ & $10$ & 是 & $8448$ & $4792$ & baseline & $80328$ & $1.0000$ & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\captionof{table}{case2。$4\times4$ 比第二名 $3\times8$ 少 $9536$ 的 latency。}
+\label{tab:top2}
+\small
+\begin{tabular}{@{}rrrrrrrrl@{}}
+\toprule
+$R\times S$ & 寄存器 & 整除 & $\mreg$ & $\mc$ & $A/B/C$ & latency & 加速比 & \\
+\midrule
+$4\times4$ & $28$ & 是 & $17408$ & $3200$ & $896/2048/256$ & $65408$ & $9.2808$ & * 采用\\
+$3\times8$ & $35$ & 否 & $16384$ & $3904$ & $832/2816/256$ & $74944$ & $8.0999$ & *\\
+$4\times6$ & $36$ & 否 & $15360$ & $4200$ & $1032/2816/352$ & $78360$ & $7.7468$ & *\\
+$4\times5$ & $32$ & 否 & $16384$ & $4888$ & $1144/3328/416$ & $89704$ & $6.7671$ & \\
+$2\times8$ & $26$ & 是 & $21504$ & $5184$ & $832/4096/256$ & $99264$ & $6.1154$ & *\\
+$8\times2$ & $32$ & 是 & $21504$ & $18944$ & $16384/2048/512$ & $305664$ & $1.9860$ & \\
+$1\times1$ & $10$ & 是 & $66560$ & $36032$ & baseline & $607040$ & $1$ & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\captionof{table}{case3。能整除 $27$ 的块形里，最好的 $1\times27$ 仍然比 $4\times6$ 慢大约 $7.4\times10^4$。}
+\label{tab:top3}
+\small
+\begin{tabular}{@{}rrrrrrrrl@{}}
+\toprule
+$R\times S$ & 寄存器 & 整除 & $\mreg$ & $\mc$ & $A/B/C$ & latency & 加速比 & \\
+\midrule
+$4\times6$ & $36$ & 否 & $14013$ & $5003$ & $1697/3024/282$ & $89058$ & $6.8892$ & * 采用\\
+$3\times7$ & $32$ & 否 & $15120$ & $5267$ & $1404/3600/263$ & $94125$ & $6.5184$ & *\\
+$3\times8$ & $35$ & 否 & $15120$ & $5273$ & $1402/3609/262$ & $94215$ & $6.5121$ & \\
+$4\times5$ & $32$ & 否 & $15120$ & $5519$ & $1988/3227/304$ & $97905$ & $6.2667$ & *\\
+$5\times4$ & $33$ & 否 & $15120$ & $5600$ & $2314/2964/322$ & $99120$ & $6.1899$ & *\\
+$4\times4$ & $28$ & 否 & $16227$ & $6072$ & $2292/3458/322$ & $107307$ & $5.7176$ & *\\
+$3\times3$ & $20$ & 是 & $20655$ & $8265$ & --- & $144630$ & $4.2421$ & \\
+$1\times27$ & $36$ & 是 & $31725$ & $8209$ & --- & $154860$ & $3.9619$ & \\
+$9\times1$ & $26$ & 是 & $33939$ & $12413$ & --- & $220134$ & $2.7871$ & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+三张表支持同一个选择，但理由不完全相同，所以三个 case 仍然要分开写：
+
+\begin{enumerate}
+  \item \textbf{case1、case2 用 $4\times4$。}它在各自的合法表里 latency 最小（case1 与 $5\times4$ 并列）。$S=4$ 且 $j_0$ 是 $4$ 的倍数、行宽也是 $4$ 的倍数、$B$ 的起点 $512$ 字节对齐，于是每个 $k$ 的 $B$ 切片正好是一条 cache 行。$4\times6$ 的 $\mreg$ 更小，但 $\mc$ 的增加超过~\eqref{eq:be} 的限额。
+  \item \textbf{case1 不采用与之并列的 $5\times4$。}latency、$\mc$、$\mreg$ 以及 $A/B/C$ 的缺失个数都相同，因为 $i$ 方向的块数同为 $\lceil16/5\rceil=16/4=4$，$S$ 同为 $4$。$5\times4$ 要用 $33$ 个寄存器，而且 $16$ 不是 $5$ 的倍数，最后要单独处理 $1$ 行。整除、寄存器更少、没有边缘循环，这三条把并列打破。
+  \item \textbf{case3 用 $4\times6$，并配 $3$ 行和 $3$ 列的边缘。}$27$ 的因数里能同时整除行和列、且满足~\eqref{eq:reg} 的块，$1/R+1/S$ 都比 $0.417$ 差一截：$3\times3$ 是 $2/3$，$1\times27$ 是 $1+1/27$，$9\times3$ 的寄存器数是 $9\cdot3+9+8=44>36$。$4\times6$ 虽然 $27$ 除不尽，余数只有 $3$，实测 latency 仍是 $73$ 个合法块里最小的，比第二名 $3\times7$ 少 $5067$。
+\end{enumerate}
+
+$8\times2$ 在 case2 里值得单独看一眼：$\mreg=21504$，和 $2\times8$ 一样，但 $\mc=18944$，加速比只剩 $1.9860$。case2 中第 $i$ 行和第 $i+4$ 行组号相同（第~\ref{sec:c2map}~节），连续 $8$ 行会在同一组上叠两行 $A$，块自己和自己冲突。行数更大并不自动更好。
+
+\subsection{循环顺序和 \texorpdfstring{$k$}{k} 分块没有在这份实现里使用}
+
+对实现采用的三组 $(R,S)$，又测了三种改顺序的变体。$\mreg$ 在只对调 $i_0/j_0$ 或只对调 $A/B$ 读取顺序时不变，因为 load/store 的次数没变。
+
+\begin{center}
+\captionof{table}{变体的 $\mc$ / $\mreg$ / latency。$k$ 分块会把 $C$ 按段写回再读入，所以 $\mreg$ 变大。}
+\label{tab:var}
+\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+变体 & case1 & case2 & case3\\
+\midrule
+实现（$i$ 在外，先 $A$ 后 $B$） & $496/2304/9744$ & $3200/17408/65408$ & $5003/14013/89058$\\
+$j$ 在外，先 $A$ 后 $B$ & $600/2304/11304$ & $4544/17408/85568$ & $5055/14013/89838$\\
+$i$ 在外，先 $B$ 后 $A$ & $498/2304/9774$ & $3200/17408/65408$ & $5002/14013/89043$\\
+$k$ 段长 $4$，段间把 $C$ 写回 & $624/3840/13200$ & $4992/31744/106624$ & $6291/28593/122958$\\
+$k$ 段长 $8$，段间把 $C$ 写回 & $560/2816/11216$ & $3968/23552/83072$ & $5861/21303/109218$\\
+$k$ 段长 $16$，段间把 $C$ 写回 & --- & $3456/19456/71296$ & $5505/16929/99504$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$j$ 在外比 $i$ 在外差，case2 尤其明显（$\mc$ 从 $3200$ 到 $4544$）。$i$ 在外时，同一条 $A$ 的行带要穿过各个列块，有机会留在 cache 里；$j$ 在外时，指望留下来的是 $B$ 的列带。case2 里一条 $4$ 列宽的 $B$ 带只占 $4$ 个组（第~\ref{sec:c2map}~节），$32$ 行塞不进这 $4$ 个组。先读 $B$ 再读 $A$ 只改变「谁在这一步输掉这一组」，case2 的 $\mc$ 不变，case1 多 $2$ 次，case3 少 $1$ 次。少的那 $1$ 次使 case3 的 latency 从 $89058$ 变成 $89043$，加速比在四位小数上仍是 $6.8892$ 量级，不值得为它改写代码。
+
+把 $k$ 切成几段、每段结束把 $C$ 写回、下一段再读入，是 README 说的「也许要分两次」。它增加的 $C$ 流量是实打实的指令。case2、$k$ 段长 $16$ 时有 $2$ 段，额外的 $C$ 读写是 $2\cdot1024=2048$ 次（每段都 store，第二段还要 load），$\mreg$ 从 $17408$ 变成 $19456$。$\mc$ 没有下降，反而从 $3200$ 升到 $3456$。段内 $A$ 和 $B$ 的组冲突还在，外面又多了 $C$ 的缺失。三档段长都比不分段差，所以实现把 $k$ 一次走完。
+
+\input{sec-cases.tex}
+
+\appendix
+\section{全部合法块形}
+\label{sec:sweep}
+
+三张表由 \code{manual/scripts/analyze\_partb.py} 生成，顺序是 latency 从小到大。访存顺序与第~\ref{sec:formula}~节的伪代码相同。加速比的分母是该 case 的 baseline latency。星号和 \code{csim-ref} 复核见第~\ref{sec:choose}~节，本表其余行使用同一个、已与官方 trace 对齐过的模拟器。
+
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\setlength{\LTcapwidth}{\textwidth}
+\setlength{\LTleft}{0pt plus 1fill}
+\setlength{\LTright}{0pt plus 1fill}
+\input{generated/sweep_case1.tex}
+\input{generated/sweep_case2.tex}
+\input{generated/sweep_case3.tex}
+\endgroup
+
+\section{复现}
+\label{sec:repro}
+
+在仓库根目录：
+
+\begin{lstlisting}
+python3 test/gemm_test.py
+python3 test/gemm_test.py --baseline
+./printTrace case1 >/tmp/case1.trace
+./csim-ref -s 5 -E 1 -b 4 -t /tmp/case1.trace
+g++ -std=c++23 -O0 -Wall -I. -o /tmp/probe_regs manual/scripts/probe_regs.cpp matrix.cpp
+/tmp/probe_regs
+python3 manual/scripts/analyze_partb.py --crosscheck
+cd manual && xelatex -interaction=nonstopmode partb-manual.tex
+xelatex -interaction=nonstopmode partb-manual.tex
+\end{lstlisting}
+
+\code{-{}-crosscheck} 把仓库复制到 \code{/tmp/clab-crosscheck} 再编译，不改当前目录的 \code{gemm.cpp}。\code{analyze\_partb.py} 会重写 \code{manual/generated/sweep\_case*.tex} 和 \code{manual/data/*.json}。若只重新排版手册、不重跑枚举，不要加会覆盖表格的那一步，直接在 \code{manual/} 下运行两次 \code{xelatex}。
+
+探针输出保存在 \code{manual/data/probe\_regs.txt}，与第~\ref{sec:regs}~节的表一致。官方 trace 与模拟器逐条对比的结果在 \code{manual/data/summary.json} 的 \code{trace\_cmp} 字段，八份 trace（四个 case 及其 baseline）的 \code{match} 都是 true。
+
+\end{document}

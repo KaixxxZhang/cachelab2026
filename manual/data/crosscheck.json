@@ -1,0 +1,90 @@
+[
+  {
+    "case": "case1",
+    "R": 2,
+    "S": 8,
+    "regs_formula": 26,
+    "pass_line": "",
+    "match": true,
+    "n_got": 2816,
+    "n_expect": 2816,
+    "first_mismatch": null
+  },
+  {
+    "case": "case1",
+    "R": 4,
+    "S": 6,
+    "regs_formula": 36,
+    "pass_line": "",
+    "match": true,
+    "n_got": 2048,
+    "n_expect": 2048,
+    "first_mismatch": null
+  },
+  {
+    "case": "case1",
+    "R": 5,
+    "S": 4,
+    "regs_formula": 33,
+    "pass_line": "",
+    "match": true,
+    "n_got": 2304,
+    "n_expect": 2304,
+    "first_mismatch": null
+  },
+  {
+    "case": "case2",
+    "R": 4,
+    "S": 6,
+    "regs_formula": 36,
+    "pass_line": "",
+    "match": true,
+    "n_got": 15360,
+    "n_expect": 15360,
+    "first_mismatch": null
+  },
+  {
+    "case": "case2",
+    "R": 2,
+    "S": 8,
+    "regs_formula": 26,
+    "pass_line": "",
+    "match": true,
+    "n_got": 21504,
+    "n_expect": 21504,
+    "first_mismatch": null
+  },
+  {
+    "case": "case3",
+    "R": 3,
+    "S": 6,
+    "regs_formula": 29,
+    "pass_line": "",
+    "match": true,
+    "n_got": 16227,
+    "n_expect": 16227,
+    "first_mismatch": null
+  },
+  {
+    "case": "case3",
+    "R": 5,
+    "S": 4,
+    "regs_formula": 33,
+    "pass_line": "",
+    "match": true,
+    "n_got": 15120,
+    "n_expect": 15120,
+    "first_mismatch": null
+  },
+  {
+    "case": "case3",
+    "R": 4,
+    "S": 5,
+    "regs_formula": 32,
+    "pass_line": "",
+    "match": true,
+    "n_got": 15120,
+    "n_expect": 15120,
+    "first_mismatch": null
+  }
+]
